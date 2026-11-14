@@ -45,9 +45,10 @@ canvas{display:block;width:240%}
 
 <section>
 <h2>1. Answer key</h2>
-<input type="file" id="kf" accept="image/*,application/pdf">
-<p id="ks" class="note" style="margin-top:8px">PDF or image of the key. You can also paste or edit the rows below: question, then series A, B, C, D (use # for a cancelled question).</p>
+<input type="file" id="kf" accept="image/*,application/pdf" multiple>
+<p id="ks" class="note" style="margin-top:8px">PDF or image of the key. If the key is split over several pages or photos, select them all together or add them one after another. You can also paste or edit the rows below: question, then series A, B, C, D (use # for a cancelled question).</p>
 <textarea id="kt" rows="6" spellcheck="false" placeholder="1 1 3 3 2&#10;2 4 1 1 4"></textarea>
+<button id="kc" type="button" style="margin-top:8px;border:1px solid var(--line);background:none;color:inherit;border-radius:8px;padding:6px 12px;font:inherit;cursor:pointer">Clear key</button>
 </section>
 
 <section>
@@ -74,6 +75,7 @@ canvas{display:block;width:240%}
 </details>
 
 <section id="res" hidden>
+<p id="wn" class="note" hidden></p>
 <div class="hero">
 <div class="ring"><div><b id="sc">0</b><br><small id="mx"></small></div></div>
 <dl class="stats" id="st"></dl>
@@ -96,9 +98,14 @@ const pos=(q,o)=>{const i=q-1;return[GX[Math.floor(i/35)][o],BY[Math.floor(i%35/
 
 /*PK*/
 function parseKey(t){
-  const key={};let m;
-  const re=/(?<![\d#])(\d{1,3})\s+([1-4#])\s+([1-4#])\s+([1-4#])\s+([1-4#])(?![\d#])/g;
-  while((m=re.exec(t))){const q=+m[1];if(q>=1&&q<=200&&!key[q])key[q]=m.slice(2,6).map(v=>v==='#'?0:+v)}
+  const key={};
+  const scan=(s,sep)=>{
+    const re=new RegExp('(?<![\\d#])(\\d{1,3})'+(sep+'([1-4#])').repeat(4)+'(?![\\d#])','g');let m;
+    while((m=re.exec(s))){const q=+m[1];if(q>=1&&q<=200&&!key[q])key[q]=m.slice(2,6).map(v=>v==='#'?0:+v)}
+  };
+  t.split('\n').forEach(l=>scan(l,'[ \\t]+'));
+  if(Object.keys(key).length<10)scan(t,'\\s+');
+  let m;
   if(Object.keys(key).length<10){
     const r2=/(\d{1,3})\s*[.):\-]?\s*([A-Da-d1-4#])(?![\w#])/g;
     while((m=r2.exec(t))){const q=+m[1],v=m[2]==='#'?0:/\d/.test(m[2])?+m[2]:m[2].toUpperCase().charCodeAt(0)-64;
@@ -110,13 +117,16 @@ const fmtKey=k=>Object.keys(k).map(Number).sort((a,b)=>a-b).map(q=>q+' '+k[q].ma
 /*/PK*/
 
 /* ---------- OMR core ---------- */
-function detectCorners(R,w,h){
-  const hist=new Array(256).fill(0);for(let i=0;i<R.length;i++)hist[R[i]]++;
+function otsu(A){
+  const hist=new Array(256).fill(0);for(let i=0;i<A.length;i++)hist[A[i]]++;
   let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
   let wb=0,sb=0,bv=0,T=100;
-  for(let i=0;i<256;i++){wb+=hist[i];if(!wb)continue;const wf=R.length-wb;if(!wf)break;sb+=i*hist[i];
+  for(let i=0;i<256;i++){wb+=hist[i];if(!wb)continue;const wf=A.length-wb;if(!wf)break;sb+=i*hist[i];
     const d=sb/wb-(sum-sb)/wf,v=wb*wf*d*d;if(v>bv){bv=v;T=i}}
-  T=Math.min(T,110);
+  return T;
+}
+function detectCorners(R,w,h){
+  const T=Math.min(otsu(R),110);
   const seen=new Uint8Array(w*h),st=new Int32Array(w*h),c=[null,null,null,null];
   for(let s=0;s<w*h;s++){
     if(R[s]>=T||seen[s])continue;
@@ -185,6 +195,19 @@ function readSheet(O){
   return{f,s:SERX.map(x=>fillAt(O,x,SERY))};
 }
 
+/* Remove table borders so OCR reads rows of digits. G: grayscale w*h, s: upscale factor. Returns 0/255 image. */
+function lineClean(G,w,h,s){
+  const T=otsu(G),bw=new Uint8Array(w*h),kill=new Uint8Array(w*h),L=Math.round(60*s),m=2;
+  for(let i=0;i<w*h;i++)bw[i]=G[i]<T?1:0;
+  for(let y=0;y<h;y++){let r=0;for(let x=0;x<=w;x++){
+    if(x<w&&bw[y*w+x])r++;else{if(r>=L)for(let k=x-r;k<x;k++)for(let j=Math.max(0,y-m);j<=Math.min(h-1,y+m);j++)kill[j*w+k]=1;r=0}}}
+  for(let x=0;x<w;x++){let r=0;for(let y=0;y<=h;y++){
+    if(y<h&&bw[y*w+x])r++;else{if(r>=L)for(let k=y-r;k<y;k++)for(let j=Math.max(0,x-m);j<=Math.min(w-1,x+m);j++)kill[k*w+j]=1;r=0}}}
+  const out=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++)out[i]=bw[i]&&!kill[i]?0:255;
+  return out;
+}
+
 /* ---------- file loading ---------- */
 const mkc=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
 const isPdf=f=>f.type==='application/pdf'||/\.pdf$/i.test(f.name);
@@ -213,11 +236,21 @@ async function pdfText(file){
   }
   return{t,n:pdf.numPages};
 }
+function cleanForOcr(c){
+  const s=Math.min(3,Math.max(1,3000/Math.max(c.width,c.height))),w=Math.round(c.width*s),h=Math.round(c.height*s);
+  const t=mkc(w,h),x=t.getContext('2d',{willReadFrequently:true});
+  x.imageSmoothingQuality='high';x.drawImage(c,0,0,w,h);
+  const img=x.getImageData(0,0,w,h),d=img.data,G=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++)G[i]=d[i*4]*.3+d[i*4+1]*.59+d[i*4+2]*.11;
+  const out=lineClean(G,w,h,s);
+  for(let i=0;i<w*h;i++){d[i*4]=d[i*4+1]=d[i*4+2]=out[i];d[i*4+3]=255}
+  x.putImageData(img,0,0);return t;
+}
 async function ocr(canvas){
   if(!window.Tesseract)await loadJS('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
   const w=await Tesseract.createWorker('eng');
-  await w.setParameters({tessedit_char_whitelist:'0123456789# ',preserve_interword_spaces:'1'});
-  const{data}=await w.recognize(canvas);await w.terminate();return data.text;
+  await w.setParameters({tessedit_char_whitelist:'0123456789# ',preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});
+  const{data}=await w.recognize(cleanForOcr(canvas));await w.terminate();return data.text;
 }
 
 /* ---------- app ---------- */
@@ -227,27 +260,34 @@ const say=(el,t,c='note')=>{el.className=c;el.textContent=t};
 function onKey(){
   KEY=parseKey($('kt').value);
   const n=Object.keys(KEY).length,x=Object.values(KEY).flat().filter(v=>!v).length;
-  say($('ks'),n?`Key loaded: ${n} questions${x?`, ${x} cancelled entries (#)`:''}. Check the rows below against your key.`:'No answers found yet. Paste rows like "1 1 3 3 2".',n?'good':'note');
+  const mx=Math.max(0,...Object.keys(KEY).map(Number)),gap=[];for(let q=1;q<=mx;q++)if(!KEY[q])gap.push(q);
+  say($('ks'),n?`Key loaded: ${n} questions${x?`, ${x} cancelled entries (#)`:''}.${gap.length?` Missing: ${gap.join(', ')}. Add these rows in the box below.`:' Check the rows below against your key.'}`:'No answers found yet. Paste rows like "1 1 3 3 2".',n&&!gap.length?'good':n?'err':'note');
   try{localStorage.setItem('omr-key',$('kt').value)}catch(e){}
   render();
 }
 $('kf').onchange=async()=>{
-  const f=$('kf').files[0];if(!f)return;
+  const fs=[...$('kf').files];if(!fs.length)return;
+  const cur=parseKey($('kt').value);
   try{
-    say($('ks'),'Reading '+f.name+'...');
-    let t='';
-    if(isPdf(f)){
-      const r=await pdfText(f);t=r.t;
-      if(Object.keys(parseKey(t)).length<10){
-        say($('ks'),'No text found in the PDF. Running OCR, this can take a minute...');t='';
-        for(let p=1;p<=r.n;p++)t+=await ocr(await toCanvas(f,2200,p))+'\n';
-      }
-    }else{say($('ks'),'Running OCR on the image, this can take a minute...');t=await ocr(await toCanvas(f,2400))}
-    const k=parseKey(t);
-    if(!Object.keys(k).length)throw new Error('Could not read any answers from this file. Paste the key rows below instead.');
-    $('kt').value=fmtKey(k);onKey();
+    for(const f of fs){
+      say($('ks'),'Reading '+f.name+'...');
+      let t='';
+      if(isPdf(f)){
+        const r=await pdfText(f);t=r.t;
+        if(Object.keys(parseKey(t)).length<10){
+          say($('ks'),'No text found in the PDF. Running OCR, this can take a minute...');t='';
+          for(let p=1;p<=r.n;p++)t+=await ocr(await toCanvas(f,2200,p))+'\n';
+        }
+      }else{say($('ks'),'Reading '+f.name+' with OCR, this can take a minute...');t=await ocr(await toCanvas(f,2400))}
+      const k=parseKey(t);
+      if(!Object.keys(k).length)throw new Error('Could not read any answers from '+f.name+'. Paste the key rows below instead.');
+      Object.assign(cur,k);
+    }
+    $('kt').value=fmtKey(cur);onKey();
   }catch(e){say($('ks'),e.message,'err')}
+  $('kf').value='';
 };
+$('kc').onclick=()=>{$('kt').value='';onKey()};
 $('kt').oninput=onKey;
 
 $('of').onchange=async()=>{
@@ -265,7 +305,8 @@ $('of').onchange=async()=>{
     const m=SCAN.s.map((v,i)=>v>.4?i:-1).filter(i=>i>=0);
     if(m.length===1){$('ser').value=m[0];say($('sd'),' Detected from the sheet: series '+'ABCD'[m[0]],'good')}
     else say($('sd'),' Could not read the series bubble. Pick the series printed on the booklet.','err');
-    say($('os'),'Scan complete. Check the scanned sheet at the bottom to confirm the marks were read correctly.','good');
+    const nm=Object.values(SCAN.f).filter(v=>v.some(x=>x>.4)).length;
+    say($('os'),`Scan complete: ${nm} answered questions found on the sheet. Check the scanned sheet at the bottom to confirm.`,'good');
     render();
   }catch(e){say($('os'),e.message,'err')}
 };
@@ -275,7 +316,10 @@ function render(){
   if(!SCAN)return;
   $('res').hidden=false;
   const S=+$('ser').value,mk=+$('mk').value,ng=+$('ng').value,thr=+$('sn').value;
-  const qs=Object.keys(KEY).map(Number).sort((a,b)=>a-b);
+  const qs=Object.keys(KEY).map(Number).sort((a,b)=>a-b),nk=[];
+  for(let q=1;q<=200;q++)if(!KEY[q]&&SCAN.f[q].some(v=>v>thr))nk.push(q);
+  $('wn').hidden=!nk.length;$('wn').className='err';
+  $('wn').textContent=nk.length?`${nk.length} answered questions have no key row and are not scored: ${nk.join(', ')}.`:'';
   const ctx=$('cv').getContext('2d');ctx.putImageData(new ImageData(SCAN.O,TPL.W,TPL.H),0,0);
   if(!qs.length){$('sc').textContent='-';$('mx').textContent='';$('st').innerHTML='<dd>Add the answer key above to see your score.</dd>';$('tb').innerHTML='';return}
   const ring=(q,o,col,fill)=>{const[x,y]=pos(q,o);ctx.beginPath();ctx.arc(x,y,13,0,7);ctx.lineWidth=4;ctx.strokeStyle=col;if(fill){ctx.fillStyle=col+'66';ctx.fill()}ctx.stroke()};
