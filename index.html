@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MPSC OMR Checker</title>
+<style>
+:root{--ink:#1d2140;--mut:#5d637f;--bg:#f2f3f8;--card:#fff;--line:#dde0ee;--pink:#d4146e;--ok:#17825a;--bad:#c62f2f;--warn:#b7791f}
+@media(prefers-color-scheme:dark){:root{--ink:#e8e9f4;--mut:#a3a8c4;--bg:#14152a;--card:#1e2040;--line:#33365e;--pink:#ff5aa5;--ok:#4fd49c;--bad:#ff7a7a;--warn:#e8b64c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.6rem;margin:8px 0 4px}
+h2{font-size:1.05rem;margin:0 0 10px}
+p{margin:0 0 10px}
+.note{color:var(--mut);font-size:.9rem}
+section,details{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:14px}
+summary{cursor:pointer;font-weight:600}
+input[type=file]{width:100%;font:inherit}
+input[type=file]::file-selector-button{background:var(--pink);color:#fff;border:0;border-radius:8px;padding:10px 16px;margin-right:12px;font:inherit;font-weight:600;cursor:pointer}
+textarea,input,select{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:8px;padding:8px}
+textarea{width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.85rem;margin-top:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:10px}
+.grid label{display:flex;flex-direction:column;font-size:.9rem;gap:4px}
+.err{color:var(--bad)}.good{color:var(--ok)}
+.hero{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.ring{width:140px;height:140px;border-radius:50%;border:10px solid var(--pink);display:grid;place-items:center;text-align:center;flex:none}
+.ring b{font-size:2rem;line-height:1}.ring small{color:var(--mut)}
+.stats{display:grid;grid-template-columns:repeat(2,auto);gap:2px 24px;margin:0}
+.stats dt{color:var(--mut)}.stats dd{margin:0;font-weight:600}
+.tw{max-height:420px;overflow:auto;margin-top:10px}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{padding:4px 8px;text-align:center;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--card)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.blank,.void{color:var(--mut)}
+.sheet{overflow:auto;margin-top:10px;border:1px solid var(--line);border-radius:8px}
+canvas{display:block;width:240%}
+@media(min-width:700px){canvas{width:100%}}
+</style>
+</head>
+<body>
+<main>
+<h1>MPSC OMR checker</h1>
+<p class="note">Upload the answer key and a photo or PDF of the filled OMR sheet. Everything runs in your browser. Nothing is uploaded anywhere.</p>
+
+<section>
+<h2>1. Answer key</h2>
+<input type="file" id="kf" accept="image/*,application/pdf">
+<p id="ks" class="note" style="margin-top:8px">PDF or image of the key. You can also paste or edit the rows below: question, then series A, B, C, D (use # for a cancelled question).</p>
+<textarea id="kt" rows="6" spellcheck="false" placeholder="1 1 3 3 2&#10;2 4 1 1 4"></textarea>
+</section>
+
+<section>
+<h2>2. OMR sheet</h2>
+<input type="file" id="of" accept="image/*,application/pdf">
+<p id="os" class="note" style="margin-top:8px">Keep the whole sheet in the frame, including all 4 black corner dots. Use even light and a flat surface.</p>
+<label>Booklet series
+<select id="ser"><option value="0">A</option><option value="1">B</option><option value="2">C</option><option value="3">D</option></select></label>
+<span id="sd" class="note"></span>
+</section>
+
+<details>
+<summary>Scoring settings</summary>
+<div class="grid">
+<label>Marks per correct answer<input id="mk" type="number" step="any" value="1"></label>
+<label>Marks deducted per wrong answer<input id="ng" type="number" step="any" value="0.25"></label>
+<label>More than one bubble marked
+<select id="mz"><option value="wrong">Count as wrong</option><option value="zero">Count as unattempted</option></select></label>
+<label>Cancelled questions (#)
+<select id="cx"><option value="void">Leave out of scoring</option><option value="free">Give marks to everyone</option></select></label>
+<label>Mark detection
+<select id="sn"><option value="0.4">Normal (pen, fully filled)</option><option value="0.22">Sensitive (pencil, light marks)</option></select></label>
+</div>
+</details>
+
+<section id="res" hidden>
+<div class="hero">
+<div class="ring"><div><b id="sc">0</b><br><small id="mx"></small></div></div>
+<dl class="stats" id="st"></dl>
+</div>
+<details open><summary>Question by question</summary>
+<div class="tw"><table><thead><tr><th>Q</th><th>Marked</th><th>Key</th><th></th></tr></thead><tbody id="tb"></tbody></table></div></details>
+<details><summary>Check the scan (green is correct, red is wrong, amber is the key answer you left blank)</summary>
+<div class="sheet"><canvas id="cv" width="1440" height="2034"></canvas></div></details>
+</section>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const PDFJS='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+const TPL={W:1440,H:2034,dots:[[36,46],[1403,46],[1403,1997],[36,1997]]};
+const GX=[[139.1,178.2,218.8,258.6],[352.8,392.5,434.2,473.9],[568.9,608.3,647.5,687.6],[783.6,823.2,864.5,903],[997.4,1038.4,1078.1,1120.1],[1213.2,1252.6,1294.4,1334.8]];
+const BY=[589.3,797.4,1004.8,1212.5,1420,1627.4,1835.6];
+const SERX=[838.5,871.5,904.5,934.5],SERY=371.5;
+const pos=(q,o)=>{const i=q-1;return[GX[Math.floor(i/35)][o],BY[Math.floor(i%35/5)]+i%5*34.5]};
+
+/*PK*/
+function parseKey(t){
+  const key={};let m;
+  const re=/(?<![\d#])(\d{1,3})\s+([1-4#])\s+([1-4#])\s+([1-4#])\s+([1-4#])(?![\d#])/g;
+  while((m=re.exec(t))){const q=+m[1];if(q>=1&&q<=200&&!key[q])key[q]=m.slice(2,6).map(v=>v==='#'?0:+v)}
+  if(Object.keys(key).length<10){
+    const r2=/(\d{1,3})\s*[.):\-]?\s*([A-Da-d1-4#])(?![\w#])/g;
+    while((m=r2.exec(t))){const q=+m[1],v=m[2]==='#'?0:/\d/.test(m[2])?+m[2]:m[2].toUpperCase().charCodeAt(0)-64;
+      if(q>=1&&q<=200&&!key[q])key[q]=[v,v,v,v]}
+  }
+  return key;
+}
+const fmtKey=k=>Object.keys(k).map(Number).sort((a,b)=>a-b).map(q=>q+' '+k[q].map(v=>v||'#').join(' ')).join('\n');
+/*/PK*/
+
+/* ---------- OMR core ---------- */
+function detectCorners(R,w,h){
+  const hist=new Array(256).fill(0);for(let i=0;i<R.length;i++)hist[R[i]]++;
+  let sum=0;for(let i=0;i<256;i++)sum+=i*hist[i];
+  let wb=0,sb=0,bv=0,T=100;
+  for(let i=0;i<256;i++){wb+=hist[i];if(!wb)continue;const wf=R.length-wb;if(!wf)break;sb+=i*hist[i];
+    const d=sb/wb-(sum-sb)/wf,v=wb*wf*d*d;if(v>bv){bv=v;T=i}}
+  T=Math.min(T,110);
+  const seen=new Uint8Array(w*h),st=new Int32Array(w*h),c=[null,null,null,null];
+  for(let s=0;s<w*h;s++){
+    if(R[s]>=T||seen[s])continue;
+    let sp=0,a=0,sx=0,sy=0,x0=w,x1=0,y0=h,y1=0;st[sp++]=s;seen[s]=1;
+    while(sp){const p=st[--sp],x=p%w,y=(p-x)/w;a++;sx+=x;sy+=y;
+      if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;
+      if(x>0&&!seen[p-1]&&R[p-1]<T){seen[p-1]=1;st[sp++]=p-1}
+      if(x<w-1&&!seen[p+1]&&R[p+1]<T){seen[p+1]=1;st[sp++]=p+1}
+      if(y>0&&!seen[p-w]&&R[p-w]<T){seen[p-w]=1;st[sp++]=p-w}
+      if(y<h-1&&!seen[p+w]&&R[p+w]<T){seen[p+w]=1;st[sp++]=p+w}}
+    const bw=x1-x0+1,bh=y1-y0+1,ar=bw/bh,fr=a/(bw*bh);
+    if(a<20||a>w*h*.003||ar<.7||ar>1.43||fr<.62||fr>.92)continue;
+    const cx=sx/a,cy=sy/a,q=cy>h/2?(cx>w/2?2:3):(cx>w/2?1:0);
+    if(!c[q]||a>c[q].a)c[q]={a,p:[cx,cy]};
+  }
+  if(c.some(v=>!v))throw new Error('Could not find all 4 black corner dots. Retake the photo with the whole sheet in frame, even light, and no dark objects touching the edges.');
+  const ar=c.map(v=>v.a);
+  if(Math.max(...ar)/Math.min(...ar)>3)throw new Error('The corner dots look inconsistent. Retake the photo with the whole sheet visible.');
+  return c.map(v=>v.p);
+}
+function orient(p){
+  const s=p.map(([x,y])=>x+y),d=p.map(([x,y])=>x-y),D=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+  let o=[p[s.indexOf(Math.min(...s))],p[d.indexOf(Math.max(...d))],p[s.indexOf(Math.max(...s))],p[d.indexOf(Math.min(...d))]];
+  if(D(o[0],o[1])>D(o[1],o[2]))o=[o[1],o[2],o[3],o[0]];
+  return o;
+}
+function homog(P,Q){
+  const A=[];
+  for(let i=0;i<4;i++){const[X,Y]=P[i],[u,v]=Q[i];A.push([X,Y,1,0,0,0,-u*X,-u*Y,u],[0,0,0,X,Y,1,-v*X,-v*Y,v])}
+  for(let i=0;i<8;i++){
+    let m=i;for(let r=i+1;r<8;r++)if(Math.abs(A[r][i])>Math.abs(A[m][i]))m=r;
+    [A[i],A[m]]=[A[m],A[i]];
+    for(let r=0;r<8;r++)if(r!==i){const f=A[r][i]/A[i][i];for(let c=i;c<9;c++)A[r][c]-=f*A[i][c]}
+  }
+  return A.map((r,i)=>r[8]/r[i]);
+}
+function warp(S,sw,sh,Q){
+  const[a,b,c,d,e,f,g,h]=homog(TPL.dots,Q),W=TPL.W,H=TPL.H,O=new Uint8ClampedArray(W*H*4);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const z=g*x+h*y+1,u=(a*x+b*y+c)/z,v=(d*x+e*y+f)/z,o=(y*W+x)*4,u0=Math.floor(u),v0=Math.floor(v);
+    O[o+3]=255;
+    if(u0<0||v0<0||u0>=sw-1||v0>=sh-1){O[o]=O[o+1]=O[o+2]=255;continue}
+    const fx=u-u0,fy=v-v0,i=(v0*sw+u0)*4,j=i+sw*4;
+    for(let k=0;k<3;k++)O[o+k]=S[i+k]*(1-fx)*(1-fy)+S[i+4+k]*fx*(1-fy)+S[j+k]*(1-fx)*fy+S[j+4+k]*fx*fy;
+  }
+  return O;
+}
+function pinkFrac(O,x0,x1,y0,y1){
+  let n=0,t=0;
+  for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){const i=(y*TPL.W+x)*4;t++;if(O[i]>150&&O[i]-O[i+1]>90&&O[i+2]-O[i+1]>25)n++}
+  return n/t;
+}
+const isFlipped=O=>pinkFrac(O,90,1040,140,158)<pinkFrac(O,TPL.W-1040,TPL.W-90,TPL.H-158,TPL.H-140);
+/* Pink print is bright in the red channel, so only pen/pencil marks look dark there. */
+function fillAt(O,cx,cy){
+  const W=TPL.W,rx=Math.round(cx),ry=Math.round(cy),ws=[];
+  for(let k=0;k<16;k++)for(const r of[15,19])ws.push(O[(Math.round(cy+r*Math.sin(k*Math.PI/8))*W+Math.round(cx+r*Math.cos(k*Math.PI/8)))*4]);
+  ws.sort((p,q)=>p-q);
+  const white=ws[ws.length>>1];let n=0,d=0;
+  for(let dy=-7;dy<=7;dy++)for(let dx=-7;dx<=7;dx++)if(dx*dx+dy*dy<=49){n++;if(O[((ry+dy)*W+rx+dx)*4]<white*.7)d++}
+  return d/n;
+}
+function readSheet(O){
+  const f={};
+  for(let q=1;q<=200;q++)f[q]=[0,1,2,3].map(o=>fillAt(O,...pos(q,o)));
+  return{f,s:SERX.map(x=>fillAt(O,x,SERY))};
+}
+
+/* ---------- file loading ---------- */
+const mkc=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+const isPdf=f=>f.type==='application/pdf'||/\.pdf$/i.test(f.name);
+const loadJS=src=>new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=()=>no(new Error('Could not load '+src));document.head.append(s)});
+async function openPdf(file){
+  if(!window.pdfjsLib){await loadJS(PDFJS+'pdf.min.js');pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS+'pdf.worker.min.js'}
+  return pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+}
+async function toCanvas(file,max,page=1){
+  if(isPdf(file)){
+    const pdf=await openPdf(file),pg=await pdf.getPage(Math.min(page,pdf.numPages));
+    const vp=pg.getViewport({scale:max/pg.getViewport({scale:1}).width}),c=mkc(vp.width,vp.height);
+    await pg.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;return c;
+  }
+  const img=await new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=()=>no(new Error('Could not open this image.'));i.src=URL.createObjectURL(file)});
+  const k=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight)),c=mkc(Math.round(img.naturalWidth*k),Math.round(img.naturalHeight*k));
+  c.getContext('2d').drawImage(img,0,0,c.width,c.height);URL.revokeObjectURL(img.src);return c;
+}
+async function pdfText(file){
+  const pdf=await openPdf(file);let t='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const items=(await(await pdf.getPage(p)).getTextContent()).items.filter(i=>i.str.trim()).map(i=>({s:i.str,x:i.transform[4],y:i.transform[5]}));
+    const lines=[];
+    for(const i of items){const L=lines.find(l=>Math.abs(l.y-i.y)<4);L?L.a.push(i):lines.push({y:i.y,a:[i]})}
+    lines.sort((a,b)=>b.y-a.y).forEach(l=>t+=l.a.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ')+'\n');
+  }
+  return{t,n:pdf.numPages};
+}
+async function ocr(canvas){
+  if(!window.Tesseract)await loadJS('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
+  const w=await Tesseract.createWorker('eng');
+  await w.setParameters({tessedit_char_whitelist:'0123456789# ',preserve_interword_spaces:'1'});
+  const{data}=await w.recognize(canvas);await w.terminate();return data.text;
+}
+
+/* ---------- app ---------- */
+let KEY={},SCAN=null;
+const say=(el,t,c='note')=>{el.className=c;el.textContent=t};
+
+function onKey(){
+  KEY=parseKey($('kt').value);
+  const n=Object.keys(KEY).length,x=Object.values(KEY).flat().filter(v=>!v).length;
+  say($('ks'),n?`Key loaded: ${n} questions${x?`, ${x} cancelled entries (#)`:''}. Check the rows below against your key.`:'No answers found yet. Paste rows like "1 1 3 3 2".',n?'good':'note');
+  try{localStorage.setItem('omr-key',$('kt').value)}catch(e){}
+  render();
+}
+$('kf').onchange=async()=>{
+  const f=$('kf').files[0];if(!f)return;
+  try{
+    say($('ks'),'Reading '+f.name+'...');
+    let t='';
+    if(isPdf(f)){
+      const r=await pdfText(f);t=r.t;
+      if(Object.keys(parseKey(t)).length<10){
+        say($('ks'),'No text found in the PDF. Running OCR, this can take a minute...');t='';
+        for(let p=1;p<=r.n;p++)t+=await ocr(await toCanvas(f,2200,p))+'\n';
+      }
+    }else{say($('ks'),'Running OCR on the image, this can take a minute...');t=await ocr(await toCanvas(f,2400))}
+    const k=parseKey(t);
+    if(!Object.keys(k).length)throw new Error('Could not read any answers from this file. Paste the key rows below instead.');
+    $('kt').value=fmtKey(k);onKey();
+  }catch(e){say($('ks'),e.message,'err')}
+};
+$('kt').oninput=onKey;
+
+$('of').onchange=async()=>{
+  const f=$('of').files[0];if(!f)return;
+  try{
+    say($('os'),'Scanning...');await new Promise(r=>setTimeout(r,30));
+    const c=await toCanvas(f,2400),sw=c.width,sh=c.height,S=c.getContext('2d',{willReadFrequently:true}).getImageData(0,0,sw,sh).data;
+    const k=Math.min(1,1000/Math.max(sw,sh)),w=Math.round(sw*k),h=Math.round(sh*k),t=mkc(w,h);
+    t.getContext('2d',{willReadFrequently:true}).drawImage(c,0,0,w,h);
+    const td=t.getContext('2d').getImageData(0,0,w,h).data,R=new Uint8Array(w*h);
+    for(let i=0;i<w*h;i++)R[i]=td[i*4];
+    let pts=orient(detectCorners(R,w,h).map(p=>[p[0]/k,p[1]/k])),O=warp(S,sw,sh,pts);
+    if(isFlipped(O)){pts=[pts[2],pts[3],pts[0],pts[1]];O=warp(S,sw,sh,pts)}
+    SCAN={O,...readSheet(O)};
+    const m=SCAN.s.map((v,i)=>v>.4?i:-1).filter(i=>i>=0);
+    if(m.length===1){$('ser').value=m[0];say($('sd'),' Detected from the sheet: series '+'ABCD'[m[0]],'good')}
+    else say($('sd'),' Could not read the series bubble. Pick the series printed on the booklet.','err');
+    say($('os'),'Scan complete. Check the scanned sheet at the bottom to confirm the marks were read correctly.','good');
+    render();
+  }catch(e){say($('os'),e.message,'err')}
+};
+['ser','mk','ng','mz','cx','sn'].forEach(id=>$(id).onchange=$(id).oninput=render);
+
+function render(){
+  if(!SCAN)return;
+  $('res').hidden=false;
+  const S=+$('ser').value,mk=+$('mk').value,ng=+$('ng').value,thr=+$('sn').value;
+  const qs=Object.keys(KEY).map(Number).sort((a,b)=>a-b);
+  const ctx=$('cv').getContext('2d');ctx.putImageData(new ImageData(SCAN.O,TPL.W,TPL.H),0,0);
+  if(!qs.length){$('sc').textContent='-';$('mx').textContent='';$('st').innerHTML='<dd>Add the answer key above to see your score.</dd>';$('tb').innerHTML='';return}
+  const ring=(q,o,col,fill)=>{const[x,y]=pos(q,o);ctx.beginPath();ctx.arc(x,y,13,0,7);ctx.lineWidth=4;ctx.strokeStyle=col;if(fill){ctx.fillStyle=col+'66';ctx.fill()}ctx.stroke()};
+  let C=0,W=0,B=0,M=0,X=0,rows='';
+  for(const q of qs){
+    const k=KEY[q][S],ms=SCAN.f[q].map((v,i)=>v>thr?i:-1).filter(i=>i>=0),a=ms.length===0?0:ms.length>1?-1:ms[0]+1;
+    let st,sym;
+    if(k===0){if($('cx').value==='free'){C++;st='ok';sym='free'}else{X++;st='void';sym='cancelled'}}
+    else if(a===0){B++;st='blank';sym='blank';ring(q,k-1,'#e0a000')}
+    else if(a===-1){M++;if($('mz').value==='wrong')W++;st='bad';sym='multiple';ms.forEach(o=>ring(q,o,'#e03030',1));ring(q,k-1,'#18a060')}
+    else if(a===k){C++;st='ok';sym='✓';ring(q,a-1,'#18a060',1)}
+    else{W++;st='bad';sym='✗';ring(q,a-1,'#e03030',1);ring(q,k-1,'#18a060')}
+    rows+=`<tr class="${st}"><td>${q}</td><td>${a>0?a:a<0?'multi':'-'}</td><td>${k||'#'}</td><td>${sym}</td></tr>`;
+  }
+  const total=C*mk-W*ng,max=(qs.length-X)*mk;
+  $('sc').textContent=+total.toFixed(2);$('mx').textContent='out of '+(+max.toFixed(2));
+  $('st').innerHTML=`<dt>Correct</dt><dd>${C}</dd><dt>Wrong</dt><dd>${W-($('mz').value==='wrong'?M:0)}</dd><dt>Multiple marks</dt><dd>${M}</dd><dt>Unattempted</dt><dd>${B+(($('mz').value==='zero')?M:0)}</dd><dt>Cancelled</dt><dd>${X}</dd><dt>Series used</dt><dd>${'ABCD'[S]}</dd>`;
+  $('tb').innerHTML=rows;
+}
+try{const s=localStorage.getItem('omr-key');if(s){$('kt').value=s;onKey()}}catch(e){}
+</script>
+</body>
+</html>
